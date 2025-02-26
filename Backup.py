@@ -9,14 +9,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from dotenv import load_dotenv
 
-# Попытка импортировать dotenv
-try:
-    from dotenv import load_dotenv
-    load_dotenv()  # Загружаем переменные окружения из .env
-except ImportError:
-    print("Библиотека 'python-dotenv' не установлена. Установите её с помощью 'pip install python-dotenv'.")
-    sys.exit(1)
+load_dotenv()
 
 # Константы
 VK_API_URL = 'https://api.vk.com/method'
