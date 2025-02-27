@@ -1,16 +1,18 @@
-
 import sys
 import requests
 import json
 from tqdm import tqdm
 import os
 from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from dotenv import load_dotenv
 
+# Загружаем переменные окружения
 load_dotenv()
 
 # Константы
@@ -31,10 +33,8 @@ def get_vk_photos(user_id, token, album_id='profile', count=5):
         'count': count
     }
     response = requests.get(f'{VK_API_URL}/photos.get', params=params)
-    if response.status_code == 200:
-        return response.json()['response']['items']
-    else:
-        raise Exception(f"Ошибка при получении фотографий: {response.status_code}")
+    response.raise_for_status()  # Проверка на ошибки
+    return response.json()['response']['items']
 
 def get_largest_photo(photo):
     """Возвращает URL и размер самой большой версии фотографии."""
@@ -42,8 +42,20 @@ def get_largest_photo(photo):
     largest = max(sizes, key=lambda x: x['width'] * x['height'])
     return largest['url'], largest['type']
 
+def download_image(url, file_path):
+    """Скачивает изображение с использованием stream=True."""
+    try:
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()  # Проверка на ошибки
+            with open(file_path, 'wb') as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    file.write(chunk)
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при скачивании изображения: {e}")
+        raise
+
 def upload_to_yandex_disk(file_path, yandex_token):
-    """Загружает файл на Яндекс.Диск."""
+    """Загружает файл на Яндекс. Диск."""
     headers = {
         'Authorization': f'OAuth {yandex_token}'
     }
@@ -52,32 +64,38 @@ def upload_to_yandex_disk(file_path, yandex_token):
         'overwrite': True
     }
     response = requests.get(f'{YANDEX_DISK_API_URL}/upload', headers=headers, params=params)
-    if response.status_code == 200:
-        upload_url = response.json()['href']
-        with open(file_path, 'rb') as file:
-            requests.put(upload_url, files={'file': file})
-    else:
-        raise Exception(f"Ошибка при загрузке на Яндекс.Диск: {response.status_code}")
+    response.raise_for_status()  # Проверка на ошибки
+    upload_url = response.json()['href']
+    with open(file_path, 'rb') as file:
+        requests.put(upload_url, files={'file': file})
 
 def upload_to_google_drive(file_path, creds):
     """Загружает файл на Google Drive."""
     service = build('drive', 'v3', credentials=creds)
-    file_metadata = {'name': os.path.basename(file_path)}
+    file_metadata = {'name': file_path.name}
     media = MediaFileUpload(file_path, resumable=True)
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    print(f"Файл {file_path} загружен на Google Drive с ID: {file.get('id')}")
+    print(f"Файл {file_path.name} загружен на Google Drive с ID: {file.get('id')}")
 
 def authenticate_google_drive():
-    """Аутентификация в Google Drive."""
+    """Аутентификация в Google Drive с проверкой валидности токена."""
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())  # Обновляем токен, если он истек
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
         creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
     return creds
+
+def get_file_name(photo):
+    """Генерирует уникальное имя файла на основе лайков и даты загрузки."""
+    likes = photo['likes']['count']
+    date = datetime.fromtimestamp(photo['date']).strftime("%Y%m%d_%H%M%S")  # Дата из VK
+    return f"{likes}_{date}.jpg"
 
 def main():
     try:
@@ -108,20 +126,18 @@ def main():
         for photo in tqdm(photos, desc="Обработка фотографий"):
             try:
                 url, size = get_largest_photo(photo)
-                likes = photo['likes']['count']
-                # Добавляем дату для уникальности имени файла
-                date = datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_name = f"{likes}_{date}.jpg"
+                file_name = get_file_name(photo)
+                file_path = Path("photos") / file_name
+                file_path.parent.mkdir(parents=True, exist_ok=True)  # Создаем директорию, если её нет
 
                 # Скачивание фотографии
-                with open(file_name, 'wb') as file:
-                    file.write(requests.get(url).content)
+                download_image(url, file_path)
 
                 # Загрузка на Яндекс.Диск
-                upload_to_yandex_disk(file_name, YANDEX_TOKEN)
+                upload_to_yandex_disk(file_path, YANDEX_TOKEN)
 
                 # Загрузка на Google Drive
-                upload_to_google_drive(file_name, creds)
+                upload_to_google_drive(file_path, creds)
 
                 photos_info.append({
                     'file_name': file_name,
@@ -132,8 +148,8 @@ def main():
                 print(f"Ошибка при обработке фотографии: {e}")
             finally:
                 # Удаление временного файла
-                if os.path.exists(file_name):
-                    os.remove(file_name)
+                if file_path.exists():
+                    file_path.unlink()
 
         # Сохранение информации в JSON
         with open('photos_info.json', 'w') as file:
