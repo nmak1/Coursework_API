@@ -55,7 +55,7 @@ def download_image(url, file_path):
         raise
 
 def upload_to_yandex_disk(file_path, yandex_token):
-    """Загружает файл на Яндекс. Диск."""
+    """Загружает файл на Яндекс.Диск."""
     headers = {
         'Authorization': f'OAuth {yandex_token}'
     }
@@ -77,13 +77,46 @@ def upload_to_google_drive(file_path, creds):
     file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     print(f"Файл {file_path.name} загружен на Google Drive с ID: {file.get('id')}")
 
+def refresh_token(creds):
+    """Обновляет access token с использованием refresh token."""
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+        print("Токен успешно обновлен.")
+    return creds
+
+
+def refresh_vk_token(client_id, client_secret, refresh_token):
+    """Обновляет access token с использованием refresh token."""
+    url = "https://oauth.vk.com/access_token"
+    params = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    response = requests.post(url, params=params)
+
+    # Проверка на ошибки
+    if response.status_code != 200:
+        raise Exception(f"Ошибка при обновлении токена: {response.text}")
+
+    # Парсинг JSON
+    try:
+        data = response.json()
+        return data["access_token"], data["refresh_token"]
+    except KeyError:
+        raise Exception("Ответ API не содержит access_token или refresh_token.")
+    except json.JSONDecodeError:
+        raise Exception("Ошибка при парсинге JSON.")
+
 def authenticate_google_drive():
     """Аутентификация в Google Drive с проверкой валидности токена."""
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())  # Обновляем токен, если он истек
+        creds = refresh_token(creds)  # Обновляем токен, если он истек
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
         creds = flow.run_local_server(port=0)
@@ -110,11 +143,21 @@ def main():
             ALBUM_ID = 'profile'  # По умолчанию
 
         # Загрузка токенов из переменных окружения
-        VK_TOKEN = os.getenv('VK_TOKEN')
+        VK_CLIENT_ID = os.getenv('VK_CLIENT_ID')
+        VK_CLIENT_SECRET = os.getenv('VK_CLIENT_SECRET')
+        VK_REFRESH_TOKEN = os.getenv('VK_REFRESH_TOKEN')
         YANDEX_TOKEN = os.getenv('YANDEX_TOKEN')
 
-        if not VK_TOKEN or not YANDEX_TOKEN:
-            raise ValueError("Токены не найдены в переменных окружения. Убедитесь, что файл .env настроен правильно.")
+        if not VK_CLIENT_ID or not VK_CLIENT_SECRET or not VK_REFRESH_TOKEN or not YANDEX_TOKEN:
+            raise ValueError("Необходимые токены не найдены в переменных окружения. Убедитесь, что файл .env настроен правильно.")
+
+        # Обновление access token
+        try:
+            VK_TOKEN, new_refresh_token = refresh_vk_token(VK_CLIENT_ID, VK_CLIENT_SECRET, VK_REFRESH_TOKEN)
+            print("Access token успешно обновлен.")
+        except Exception as e:
+            print(f"Ошибка при обновлении токена: {e}")
+            sys.exit(1)
 
         # Аутентификация в Google Drive
         creds = authenticate_google_drive()
